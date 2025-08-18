@@ -13,20 +13,16 @@
 </head>
 <body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
 <div class="container mx-auto p-8 bg-white shadow-xl rounded-2xl flex flex-col md:flex-row gap-8">
-    <!-- Left Panel: QR Code and Instructions -->
     <div class="flex-1 text-center md:text-left">
         <h1 class="text-3xl font-bold text-gray-800 mb-4">WebRTC VLM</h1>
-        <p class="text-gray-600 mb-4">Scan this QR code with your phone to start streaming. Ensure both devices are on the same network or use ngrok.</p>
-        <div id="qrcode" class="w-64 h-64 bg-gray-200 rounded-lg mx-auto md:mx-0"></div>
-        <p id="mode-info" class="text-sm text-gray-500 mt-2"></p>
+        <p class="text-gray-600 mb-4">Scan this QR code with your phone to start streaming. Ensure both devices are on the same Wi-Fi network.</p>
+        <div id="qrcode" class="w-64 h-64 bg-gray-200 rounded-lg mx-auto md:mx-0 flex items-center justify-center text-gray-500">Loading QR...</div>
         <div class="mt-4 p-4 bg-gray-50 rounded-lg">
             <h2 class="text-xl font-semibold text-gray-700 mb-2">Status</h2>
-            <p id="status" class="text-sm text-gray-600">Waiting for connection...</p>
-            <div id="metrics" class="text-xs text-gray-500 mt-2"></div>
+            <p id="status" class="text-sm text-gray-600">Initializing...</p>
         </div>
     </div>
 
-    <!-- Right Panel: Video and Canvas Overlays -->
     <div class="flex-1 relative bg-gray-200 rounded-lg overflow-hidden shadow-inner">
         <video id="videoElement" class="w-full h-auto block rounded-lg" autoplay playsinline></video>
         <canvas id="overlayCanvas" class="absolute top-0 left-0 w-full h-full"></canvas>
@@ -38,173 +34,115 @@
     const videoElement = document.getElementById('videoElement');
     const overlayCanvas = document.getElementById('overlayCanvas');
     const statusElement = document.getElementById('status');
-    const metricsElement = document.getElementById('metrics');
     const qrcodeDiv = document.getElementById('qrcode');
-    const modeInfo = document.getElementById('mode-info');
-    const BACKEND_URL = `http://${window.location.hostname}:8000`;
 
-    // This variable is set in the server's environment variable
-    // and is passed to the frontend via a script tag or similar.
-    // For this demo, we'll assume the client connects to a server
-    // that's configured for a specific mode. The backend determines
-    // the mode, and the frontend just acts as the client.
-    const IS_WASM_MODE = false; // We're not setting this dynamically here for simplicity, the backend handles the logic.
+    // --- THIS IS THE FIX ---
+    // Fallback to 'localhost' if hostname is empty
+    const hostname = window.location.hostname || 'localhost';
+    const BACKEND_URL = `http://${hostname}:8000`;
 
     let pc;
     let dataChannel;
-    let lastFrameTimestamp = 0;
-    let frameTimestamps = [];
-    let detections = {};
-
-    // This is a simple backpressure mechanism. It holds the last received detection results
-    // and drops older ones to ensure we always display the latest information.
     let detectionQueue = [];
     const MAX_QUEUE_SIZE = 1;
 
-    // Set up the WebRTC connection
     async function startWebRTC() {
-        pc = new RTCPeerConnection({
-            iceServers: []
-        });
-
-        pc.onicecandidate = event => {
-            if (event.candidate) {
-                // Send ICE candidate to the signaling server
-                // For this simple demo, we handle offers/answers as a single step
-                // This is simplified and might not work for complex network topologies.
-            }
-        };
-
-        pc.onaddstream = event => {
-            videoElement.srcObject = event.stream;
-        };
+        pc = new RTCPeerConnection();
 
         pc.ontrack = event => {
             videoElement.srcObject = event.streams[0];
         };
 
-        // Set up a data channel to receive detection results
         dataChannel = pc.createDataChannel("detections");
-        dataChannel.onopen = () => {
-            statusElement.textContent = 'Connection established. Waiting for video stream and detections...';
-            console.log("Data channel opened");
-        };
+        dataChannel.onopen = () => statusElement.textContent = 'Connection established. Waiting for video...';
         dataChannel.onmessage = event => {
             const data = JSON.parse(event.data);
-
-            // Add the new detection to the queue and enforce backpressure
             if (detectionQueue.length >= MAX_QUEUE_SIZE) {
                 detectionQueue.shift();
             }
             detectionQueue.push(data);
-
-            // Update metrics for the latest frame
-            const now = performance.now();
-            const e2eLatency = now - data.capture_ts;
-
-            frameTimestamps.push({
-                capture_ts: data.capture_ts,
-                e2e_latency: e2eLatency
-            });
-
-            // Keep only the last 30 seconds of data for metrics
-            const thirtySecondsAgo = now - 30000;
-            frameTimestamps = frameTimestamps.filter(t => t.capture_ts > thirtySecondsAgo);
         };
-        dataChannel.onclose = () => {
-            statusElement.textContent = 'Connection closed. Reload page to reconnect.';
-            console.log("Data channel closed");
-        };
+        dataChannel.onclose = () => statusElement.textContent = 'Connection closed.';
 
-        // Create an offer and send it to the server
-        const offer = await pc.createOffer({
-            offerToReceiveVideo: true,
-        });
+        const offer = await pc.createOffer({ offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
 
-        // Send the offer to the backend
         const response = await fetch(`${BACKEND_URL}/offer`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                sdp: pc.localDescription.sdp,
-                type: pc.localDescription.type
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
         });
 
         const answer = await response.json();
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-
-        statusElement.textContent = 'Connected. Waiting for video stream...';
+        statusElement.textContent = 'Signaling complete. Waiting for phone to connect...';
     }
 
     function drawOverlays() {
         const ctx = overlayCanvas.getContext('2d');
-
-        // Clear the canvas for a new frame
         ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-        // Get the last detection from the queue
         if (detectionQueue.length > 0) {
-            const latestDetection = detectionQueue[detectionQueue.length - 1];
-            const detections = latestDetection.detections;
-
+            const { detections } = detectionQueue[detectionQueue.length - 1];
             detections.forEach(det => {
                 const { label, xmin, ymin, xmax, ymax, score } = det;
                 const width = overlayCanvas.width;
                 const height = overlayCanvas.height;
-
                 const x = xmin * width;
                 const y = ymin * height;
                 const w = (xmax - xmin) * width;
                 const h = (ymax - ymin) * height;
 
-                ctx.strokeStyle = '#34D399'; // green-400
+                ctx.strokeStyle = '#34D399';
                 ctx.lineWidth = 2;
                 ctx.strokeRect(x, y, w, h);
-
                 const text = `${label} (${(score * 100).toFixed(0)}%)`;
                 ctx.fillStyle = '#34D399';
                 ctx.font = '16px Inter, sans-serif';
                 const textWidth = ctx.measureText(text).width;
-                const textX = x;
-                const textY = y > 20 ? y - 5 : y + 20;
-
-                ctx.fillRect(textX, textY - 15, textWidth + 8, 20);
-                ctx.fillStyle = '#111827'; // gray-900
-                ctx.fillText(text, textX + 4, textY);
+                ctx.fillRect(x, y - 20, textWidth + 8, 24);
+                ctx.fillStyle = '#111827';
+                ctx.fillText(text, x + 4, y - 2);
             });
         }
-
         requestAnimationFrame(drawOverlays);
     }
 
     videoElement.addEventListener('play', () => {
-        const videoWidth = videoElement.videoWidth;
-        const videoHeight = videoElement.videoHeight;
-        overlayCanvas.width = videoWidth;
-        overlayCanvas.height = videoHeight;
+        overlayCanvas.width = videoElement.videoWidth;
+        overlayCanvas.height = videoElement.videoHeight;
         drawOverlays();
     });
 
-    // Generate QR code and start the process
-    function generateQRCode() {
-        const url = `${window.location.protocol}//${window.location.hostname}:3000`;
-        new QRCode(qrcodeDiv, {
-            text: url,
-            width: 256,
-            height: 256,
-            colorDark : "#111827",
-            colorLight : "#f3f4f6",
-            correctLevel : QRCode.CorrectLevel.H
-        });
-        modeInfo.textContent = `Current Mode: ${IS_WASM_MODE ? 'WASM (Low-Resource)' : 'SERVER'}`;
+    async function initialize() {
+        try {
+            const response = await fetch(`${BACKEND_URL}/env`);
+            if (!response.ok) throw new Error('Failed to fetch IP');
+            const env = await response.json();
+            const localIp = env.local_ip || hostname;
+
+            const url = `${window.location.protocol}//${localIp}:3000`;
+            qrcodeDiv.innerHTML = ''; // Clear "Loading QR..." text
+            new QRCode(qrcodeDiv, {
+                text: url,
+                width: 256,
+                height: 256,
+                colorDark: "#111827",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.H
+            });
+            statusElement.innerHTML = `On your phone, scan the QR code or go to:<br><strong>${url}</strong>`;
+
+            await startWebRTC();
+
+        } catch (error) {
+            console.error("Initialization failed:", error);
+            statusElement.textContent = 'Error: Could not connect to backend server.';
+            qrcodeDiv.textContent = 'Failed to load';
+        }
     }
 
-    generateQRCode();
-    startWebRTC();
+    initialize();
 </script>
 </body>
 </html>
