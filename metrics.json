@@ -1,0 +1,7 @@
+{
+    "median_e2e_latency_ms": 72.0,
+    "p95_e2e_latency_ms": 123.86,
+    "processed_fps": 11.24,
+    "uplink_kbps": 123.07,
+    "downlink_kbps": 4.1
+}
