@@ -23,7 +23,8 @@ RUN pip install --no-cache-dir \
     aiohttp==3.9.1 \
     aiortc==1.5.0 \
     onnxruntime==1.16.3 \
-    opencv-python-headless
+    opencv-python-headless \
+    numpy==1.26.4
 
 # Expose the server port
 EXPOSE 8000
