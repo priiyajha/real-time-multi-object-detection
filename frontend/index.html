@@ -3,29 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebRTC VLM Demo</title>
+    <title>WebRTC VLM</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
-        .container { max-width: 900px; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
         video, canvas { border-radius: 12px; }
     </style>
 </head>
-<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
-<div class="container mx-auto p-8 bg-white shadow-xl rounded-2xl flex flex-col md:flex-row gap-8">
+<body class="bg-white text-black min-h-screen flex items-center justify-center p-4">
+<div class="max-w-4xl w-full p-8 bg-white rounded-2xl flex flex-col md:flex-row items-center gap-8 shadow-2xl shadow-black/20 border border-black/10">
+    <!-- Left Panel: QR Code & Status -->
     <div class="flex-1 text-center md:text-left">
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">WebRTC VLM</h1>
-        <p class="text-gray-600 mb-4">Scan this QR code with your phone to start streaming. Ensure both devices are on the same Wi-Fi network.</p>
-        <div id="qrcode" class="w-64 h-64 bg-gray-200 rounded-lg mx-auto md:mx-0 flex items-center justify-center text-gray-500">Loading QR...</div>
-        <div class="mt-4 p-4 bg-gray-50 rounded-lg">
-            <h2 class="text-xl font-semibold text-gray-700 mb-2">Status</h2>
-            <p id="status" class="text-sm text-gray-600">Initializing...</p>
+        <h1 class="text-4xl font-extrabold mb-2">WebRTC VLM</h1>
+        <p class="text-gray-700 text-sm md:text-base mb-6">Scan the QR code with your phone to start streaming live video. Ensure both devices are on the same Wi‑Fi network.</p>
+
+        <div id="qrcode" class="w-64 h-64 bg-white p-2 rounded-lg mx-auto md:mx-0 shadow-md shadow-black/20 border border-black/10 flex items-center justify-center">
+            <p class="text-gray-600 font-medium">Loading QR...</p>
+        </div>
+
+        <div class="mt-6 p-4 bg-gray-50 rounded-lg shadow-inner border border-black/10">
+            <h2 class="text-lg font-semibold mb-1">Connection Status</h2>
+            <p id="status" class="text-sm text-gray-700">Initializing...</p>
         </div>
     </div>
 
-    <div class="flex-1 relative bg-gray-200 rounded-lg overflow-hidden shadow-inner">
+    <!-- Right Panel: Video & Overlay -->
+    <div class="flex-1 relative bg-black rounded-lg overflow-hidden shadow-xl shadow-black/30 border border-black/10">
         <video id="videoElement" class="w-full h-auto block rounded-lg" autoplay playsinline></video>
-        <canvas id="overlayCanvas" class="absolute top-0 left-0 w-full h-full"></canvas>
+        <canvas id="overlayCanvas" class="absolute top-0 left-0 w-full h-full pointer-events-none"></canvas>
     </div>
 </div>
 
@@ -36,33 +42,39 @@
     const statusElement = document.getElementById('status');
     const qrcodeDiv = document.getElementById('qrcode');
 
-    // --- THIS IS THE FIX ---
-    // Fallback to 'localhost' if hostname is empty
-    const hostname = window.location.hostname || 'localhost';
-    const BACKEND_URL = `http://${hostname}:8000`;
-
+    // --- Core WebRTC setup ---
     let pc;
     let dataChannel;
     let detectionQueue = [];
     const MAX_QUEUE_SIZE = 1;
+    let BACKEND_URL = '';
+    let ROLE = 'viewer'; // 'publisher' on phone, 'viewer' on laptop
+    let viewerRetry = 0;
 
     async function startWebRTC() {
-        pc = new RTCPeerConnection();
+        if (!pc) {
+            pc = new RTCPeerConnection();
+        }
 
         pc.ontrack = event => {
             videoElement.srcObject = event.streams[0];
         };
 
-        dataChannel = pc.createDataChannel("detections");
-        dataChannel.onopen = () => statusElement.textContent = 'Connection established. Waiting for video...';
-        dataChannel.onmessage = event => {
-            const data = JSON.parse(event.data);
-            if (detectionQueue.length >= MAX_QUEUE_SIZE) {
-                detectionQueue.shift();
-            }
-            detectionQueue.push(data);
-        };
-        dataChannel.onclose = () => statusElement.textContent = 'Connection closed.';
+        // Viewer creates DC to receive detections from server
+        if (ROLE === 'viewer' && !dataChannel) {
+            dataChannel = pc.createDataChannel("detections");
+            dataChannel.onopen = () => statusElement.textContent = 'Connected. Waiting for video...';
+            dataChannel.onmessage = event => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (detectionQueue.length >= MAX_QUEUE_SIZE) {
+                        detectionQueue.shift();
+                    }
+                    detectionQueue.push(data);
+                } catch (e) {}
+            };
+            dataChannel.onclose = () => statusElement.textContent = 'Connection closed.';
+        }
 
         const offer = await pc.createOffer({ offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
@@ -70,12 +82,24 @@
         const response = await fetch(`${BACKEND_URL}/offer`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
+            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type, role: ROLE })
         });
 
         const answer = await response.json();
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
         statusElement.textContent = 'Signaling complete. Waiting for phone to connect...';
+
+        // In viewer role, retry negotiation a few times if no media arrives
+        if (ROLE === 'viewer') {
+            setTimeout(async () => {
+                if (!videoElement.srcObject && viewerRetry < 5) {
+                    try { pc.close(); } catch (e) {}
+                    pc = null; dataChannel = null; viewerRetry += 1;
+                    statusElement.textContent = `Retrying to attach stream (${viewerRetry}/5)...`;
+                    await startWebRTC();
+                }
+            }, 3000);
+        }
     }
 
     function drawOverlays() {
@@ -93,15 +117,15 @@
                 const w = (xmax - xmin) * width;
                 const h = (ymax - ymin) * height;
 
-                ctx.strokeStyle = '#34D399';
+                ctx.strokeStyle = '#000000';
                 ctx.lineWidth = 2;
                 ctx.strokeRect(x, y, w, h);
                 const text = `${label} (${(score * 100).toFixed(0)}%)`;
-                ctx.fillStyle = '#34D399';
+                ctx.fillStyle = '#000000';
                 ctx.font = '16px Inter, sans-serif';
                 const textWidth = ctx.measureText(text).width;
                 ctx.fillRect(x, y - 20, textWidth + 8, 24);
-                ctx.fillStyle = '#111827';
+                ctx.fillStyle = '#ffffff';
                 ctx.fillText(text, x + 4, y - 2);
             });
         }
@@ -114,31 +138,87 @@
         drawOverlays();
     });
 
+    // --- QR Code & Initialization Logic ---
     async function initialize() {
         try {
-            const response = await fetch(`${BACKEND_URL}/env`);
-            if (!response.ok) throw new Error('Failed to fetch IP');
+            // Fetch the dynamic IP from the backend
+            // The host is guaranteed to be 'localhost' or a loopback address in this environment.
+            const host = window.location.hostname;
+            const response = await fetch(`${window.location.protocol}//${host}:8080/env`);
+            if (!response.ok) throw new Error('Failed to fetch local IP from backend.');
             const env = await response.json();
-            const localIp = env.local_ip || hostname;
 
-            const url = `${window.location.protocol}//${localIp}:3000`;
-            qrcodeDiv.innerHTML = ''; // Clear "Loading QR..." text
+            // Use the fetched IP for WebRTC signaling
+            const localIp = env.local_ip || host;
+            BACKEND_URL = `${window.location.protocol}//${localIp}:8080`;
+
+            // The URL the phone will connect to
+            const phoneUrl = `${window.location.protocol}//${localIp}:3000`;
+
+            // Clear "Loading QR..." text and generate the QR code
+            qrcodeDiv.innerHTML = '';
             new QRCode(qrcodeDiv, {
-                text: url,
+                text: phoneUrl,
                 width: 256,
                 height: 256,
                 colorDark: "#111827",
                 colorLight: "#ffffff",
                 correctLevel: QRCode.CorrectLevel.H
             });
-            statusElement.innerHTML = `On your phone, scan the QR code or go to:<br><strong>${url}</strong>`;
 
-            await startWebRTC();
+            statusElement.innerHTML = `Scan the QR code or go to:<br><strong>${phoneUrl}</strong>`;
+
+            // Decide role: phone acts as publisher (has camera), laptop as viewer.
+            const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+            if (isMobile) {
+                ROLE = 'publisher';
+                statusElement.textContent = 'Requesting camera on phone...';
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } }, audio: false });
+                pc = new RTCPeerConnection();
+                stream.getTracks().forEach(track => pc.addTrack(track, stream));
+                videoElement.srcObject = stream; // preview on phone too
+                await startWebRTC();
+                statusElement.textContent = 'Publishing video...';
+            } else {
+                ROLE = 'viewer';
+                // WASM mode: run local inference on received frames
+                const useWasm = (env.mode === 'wasm');
+                if (useWasm) {
+                    const worker = new Worker('worker.js');
+                    let workerReady = false;
+                    let inferPending = false;
+                    worker.onmessage = (e) => {
+                        const { type, payload } = e.data;
+                        if (type === 'init_complete') {
+                            workerReady = true;
+                        } else if (type === 'result') {
+                            if (detectionQueue.length >= MAX_QUEUE_SIZE) detectionQueue.shift();
+                            detectionQueue.push(payload);
+                            inferPending = false;
+                        }
+                    };
+                    worker.postMessage({ type: 'init', payload: { modelUrl: '' } });
+                    // Periodically capture a frame for inference at ~10 FPS
+                    const off = document.createElement('canvas');
+                    const captureAndSend = () => {
+                        if (!workerReady || inferPending || !videoElement.videoWidth) return;
+                        off.width = 320; off.height = 240;
+                        const ctx = off.getContext('2d');
+                        ctx.drawImage(videoElement, 0, 0, off.width, off.height);
+                        const imgData = ctx.getImageData(0, 0, off.width, off.height);
+                        const capture_ts = performance.now();
+                        inferPending = true;
+                        worker.postMessage({ type: 'infer', payload: { frameData: imgData.data.buffer, capture_ts } }, [imgData.data.buffer]);
+                    };
+                    setInterval(captureAndSend, 100);
+                }
+                await startWebRTC();
+            }
 
         } catch (error) {
             console.error("Initialization failed:", error);
-            statusElement.textContent = 'Error: Could not connect to backend server.';
-            qrcodeDiv.textContent = 'Failed to load';
+            statusElement.textContent = 'Error: Could not connect to backend server. Make sure it is running.';
+            qrcodeDiv.innerHTML = '<p class="text-gray-500 font-medium">Failed to load</p>';
         }
     }
 

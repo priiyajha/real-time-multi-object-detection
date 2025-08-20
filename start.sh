@@ -7,6 +7,7 @@ MODE=${MODE:-wasm}
 NGROK_TUNNEL=${NGROK_TUNNEL:-false}
 
 echo "Starting WebRTC VLM demo in $MODE mode..."
+export MODE
 
 # Build and start Docker containers
 if [ "$NGROK_TUNNEL" = "true" ]; then

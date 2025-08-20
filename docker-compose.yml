@@ -1,3 +1,32 @@
+#version: '3.8'
+#
+#services:
+#  frontend:
+#    build:
+#      context: ./frontend
+#      dockerfile: Dockerfile
+#    container_name: webrtc-vlm-frontend
+#    ports:
+#      - "3000:3000"
+#    volumes:
+#      - ./frontend:/app/frontend
+#    restart: always
+#
+#  backend:
+#    build:
+#      context: ./backend
+#      dockerfile: Dockerfile
+#    container_name: webrtc-vlm-backend
+#    ports:
+#      - "8000:8000"
+#    volumes:
+#      - ./backend:/app/backend
+#      - ./models:/app/models
+#    restart: always
+#    environment:
+#      # Pass the mode to the backend container
+#      MODE: ${MODE:-wasm}
+
 version: '3.8'
 
 services:
@@ -18,11 +47,13 @@ services:
       dockerfile: Dockerfile
     container_name: webrtc-vlm-backend
     ports:
-      - "8000:8000"
+      - "8080:8080"
     volumes:
-      - ./backend:/app/backend
-      - ./models:/app/models
-    restart: always
+      - ./backend:/app
+      - ./backend/models:/app/models
     environment:
-      # Pass the mode to the backend container
-      MODE: ${MODE:-wasm}
+      - MODE=${MODE:-wasm}
+    depends_on:
+      - frontend
+    restart: always
+
