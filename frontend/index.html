@@ -141,84 +141,101 @@
     // --- QR Code & Initialization Logic ---
     async function initialize() {
         try {
-            // Fetch the dynamic IP from the backend
-            // The host is guaranteed to be 'localhost' or a loopback address in this environment.
-            const host = window.location.hostname;
-            const response = await fetch(`${window.location.protocol}//${host}:8080/env`);
-            if (!response.ok) throw new Error('Failed to fetch local IP from backend.');
-            const env = await response.json();
+            // Fallbacks based on current page host
+            const host = window.location.hostname || 'localhost';
+            const protocol = window.location.protocol;
+            BACKEND_URL = `${protocol}//${host}:8080`;
+            const fallbackPhoneUrl = `${protocol}//${host}:3000`;
 
-            // Use the fetched IP for WebRTC signaling
-            const localIp = env.local_ip || host;
-            BACKEND_URL = `${window.location.protocol}//${localIp}:8080`;
-
-            // The URL the phone will connect to
-            const phoneUrl = `${window.location.protocol}//${localIp}:3000`;
-
-            // Clear "Loading QR..." text and generate the QR code
-            qrcodeDiv.innerHTML = '';
-            new QRCode(qrcodeDiv, {
-                text: phoneUrl,
-                width: 256,
-                height: 256,
-                colorDark: "#111827",
-                colorLight: "#ffffff",
-                correctLevel: QRCode.CorrectLevel.H
-            });
-
-            statusElement.innerHTML = `Scan the QR code or go to:<br><strong>${phoneUrl}</strong>`;
-
-            // Decide role: phone acts as publisher (has camera), laptop as viewer.
-            const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-            if (isMobile) {
-                ROLE = 'publisher';
-                statusElement.textContent = 'Requesting camera on phone...';
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } }, audio: false });
-                pc = new RTCPeerConnection();
-                stream.getTracks().forEach(track => pc.addTrack(track, stream));
-                videoElement.srcObject = stream; // preview on phone too
-                await startWebRTC();
-                statusElement.textContent = 'Publishing video...';
+            // Render fallback QR immediately
+            if (typeof QRCode !== 'undefined') {
+                qrcodeDiv.innerHTML = '';
+                new QRCode(qrcodeDiv, {
+                    text: fallbackPhoneUrl,
+                    width: 256,
+                    height: 256,
+                    colorDark: "#111827",
+                    colorLight: "#ffffff",
+                    correctLevel: QRCode.CorrectLevel.H
+                });
+                statusElement.innerHTML = `Scan the QR code or go to:<br><strong>${fallbackPhoneUrl}</strong>`;
             } else {
-                ROLE = 'viewer';
-                // WASM mode: run local inference on received frames
-                const useWasm = (env.mode === 'wasm');
-                if (useWasm) {
-                    const worker = new Worker('worker.js');
-                    let workerReady = false;
-                    let inferPending = false;
-                    worker.onmessage = (e) => {
-                        const { type, payload } = e.data;
-                        if (type === 'init_complete') {
-                            workerReady = true;
-                        } else if (type === 'result') {
-                            if (detectionQueue.length >= MAX_QUEUE_SIZE) detectionQueue.shift();
-                            detectionQueue.push(payload);
-                            inferPending = false;
-                        }
-                    };
-                    worker.postMessage({ type: 'init', payload: { modelUrl: '' } });
-                    // Periodically capture a frame for inference at ~10 FPS
-                    const off = document.createElement('canvas');
-                    const captureAndSend = () => {
-                        if (!workerReady || inferPending || !videoElement.videoWidth) return;
-                        off.width = 320; off.height = 240;
-                        const ctx = off.getContext('2d');
-                        ctx.drawImage(videoElement, 0, 0, off.width, off.height);
-                        const imgData = ctx.getImageData(0, 0, off.width, off.height);
-                        const capture_ts = performance.now();
-                        inferPending = true;
-                        worker.postMessage({ type: 'infer', payload: { frameData: imgData.data.buffer, capture_ts } }, [imgData.data.buffer]);
-                    };
-                    setInterval(captureAndSend, 100);
-                }
-                await startWebRTC();
+                statusElement.textContent = 'QR library not loaded';
             }
 
+            // Try to refine with backend-provided IP
+            try {
+                const response = await fetch(`${protocol}//${host}:8080/env`);
+                if (response.ok) {
+                    const env = await response.json();
+                    const localIp = env.local_ip || host;
+                    BACKEND_URL = `${protocol}//${localIp}:8080`;
+                    const phoneUrl = `${protocol}//${localIp}:3000`;
+                    if (localIp !== host && typeof QRCode !== 'undefined') {
+                        qrcodeDiv.innerHTML = '';
+                        new QRCode(qrcodeDiv, {
+                            text: phoneUrl,
+                            width: 256,
+                            height: 256,
+                            colorDark: "#111827",
+                            colorLight: "#ffffff",
+                            correctLevel: QRCode.CorrectLevel.H
+                        });
+                        statusElement.innerHTML = `Scan the QR code or go to:<br><strong>${phoneUrl}</strong>`;
+                    }
+                    // Decide role: phone acts as publisher (has camera), laptop as viewer.
+                    const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+                    if (isMobile) {
+                        ROLE = 'publisher';
+                        statusElement.textContent = 'Requesting camera on phone...';
+                        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } }, audio: false });
+                        pc = new RTCPeerConnection();
+                        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+                        videoElement.srcObject = stream;
+                        await startWebRTC();
+                        statusElement.textContent = 'Publishing video...';
+                    } else {
+                        ROLE = 'viewer';
+                        const useWasm = (env.mode === 'wasm');
+                        if (useWasm) {
+                            const worker = new Worker('worker.js');
+                            let workerReady = false;
+                            let inferPending = false;
+                            worker.onmessage = (e) => {
+                                const { type, payload } = e.data;
+                                if (type === 'init_complete') {
+                                    workerReady = true;
+                                } else if (type === 'result') {
+                                    if (detectionQueue.length >= MAX_QUEUE_SIZE) detectionQueue.shift();
+                                    detectionQueue.push(payload);
+                                    inferPending = false;
+                                }
+                            };
+                            worker.postMessage({ type: 'init', payload: { modelUrl: '' } });
+                            const off = document.createElement('canvas');
+                            const captureAndSend = () => {
+                                if (!workerReady || inferPending || !videoElement.videoWidth) return;
+                                off.width = 320; off.height = 240;
+                                const ctx = off.getContext('2d');
+                                ctx.drawImage(videoElement, 0, 0, off.width, off.height);
+                                const imgData = ctx.getImageData(0, 0, off.width, off.height);
+                                const capture_ts = performance.now();
+                                inferPending = true;
+                                worker.postMessage({ type: 'infer', payload: { frameData: imgData.data.buffer, capture_ts } }, [imgData.data.buffer]);
+                            };
+                            setInterval(captureAndSend, 100);
+                        }
+                        await startWebRTC();
+                    }
+                } else {
+                    statusElement.textContent = 'Using local host fallback (backend env unavailable)';
+                }
+            } catch (_) {
+                statusElement.textContent = 'Using local host fallback (backend not reachable)';
+            }
         } catch (error) {
-            console.error("Initialization failed:", error);
-            statusElement.textContent = 'Error: Could not connect to backend server. Make sure it is running.';
-            qrcodeDiv.innerHTML = '<p class="text-gray-500 font-medium">Failed to load</p>';
+            console.error('Initialization failed:', error);
+            statusElement.textContent = 'Initialization error';
         }
     }
 
