@@ -22,7 +22,6 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --no-cache-dir --timeout 120 --retries 5 \
     aiohttp==3.9.1 \
     aiortc==1.5.0 \
-    onnxruntime==1.16.3 \
     opencv-python-headless \
     av==10.0.0 \
     numpy==1.26.4

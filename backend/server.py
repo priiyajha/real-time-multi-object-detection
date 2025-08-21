@@ -3,10 +3,13 @@ import json
 import logging
 import os
 import socket
+import platform
+import subprocess
 import time
 from typing import List
 
 from aiohttp import web
+from pathlib import Path
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 
@@ -26,14 +29,77 @@ viewer_datachannels: List = []
 
 
 async def get_local_ip() -> str:
+    """Attempt to find a private LAN IPv4 usable by phone.
+    Tries multiple strategies to avoid returning reserved addresses like 192.0.0.2.
+    """
+    def is_private(ip: str) -> bool:
+        if ":" in ip:
+            return False
+        if ip.startswith("10."):
+            return True
+        if ip.startswith("192.168."):
+            return True
+        if ip.startswith("172."):
+            try:
+                second = int(ip.split(".")[1])
+                return 16 <= second <= 31
+            except Exception:
+                return False
+        return False
+
+    # 1) Default route trick
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        if is_private(ip):
+            return ip
     except Exception:
-        return "127.0.0.1"
+        pass
+
+    # 2) macOS: try networksetup to find Wi‑Fi device, then ipconfig
+    try:
+        if platform.system() == "Darwin":
+            try:
+                hw = subprocess.check_output(["networksetup", "-listallhardwareports"], stderr=subprocess.DEVNULL).decode()
+                lines = hw.splitlines()
+                device = None
+                for i, line in enumerate(lines):
+                    if "Hardware Port: Wi-Fi" in line or "Hardware Port: WLAN" in line:
+                        # Next lines contain Device: enX
+                        for j in range(i+1, min(i+5, len(lines))):
+                            if lines[j].strip().startswith("Device: "):
+                                device = lines[j].split(":", 1)[1].strip()
+                                break
+                        break
+                candidates = [device] if device else []
+                candidates += ["en0", "en1", "en2"]
+            except Exception:
+                candidates = ["en0", "en1", "en2"]
+
+            for iface in candidates:
+                if not iface:
+                    continue
+                try:
+                    out = subprocess.check_output(["ipconfig", "getifaddr", iface], stderr=subprocess.DEVNULL).decode().strip()
+                    if out and is_private(out):
+                        return out
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # 3) Linux: hostname -I
+    try:
+        out = subprocess.check_output(["bash", "-lc", "hostname -I || true"], stderr=subprocess.DEVNULL).decode()
+        for token in out.split():
+            if is_private(token):
+                return token
+    except Exception:
+        pass
+
+    return "127.0.0.1"
 
 
 async def track_receiver_task(track, stop_event: asyncio.Event):
@@ -172,12 +238,34 @@ async def main():
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_post("/offer", offer)
     app.router.add_get("/env", env)
+    
+    async def metrics(request: web.Request):
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        # Write metrics.json into backend directory (mapped in Docker)
+        try:
+            backend_dir = Path(__file__).resolve().parent
+            metrics_path = backend_dir / "metrics.json"
+            metrics_path.write_text(json.dumps(payload, indent=2))
+            return web.json_response({"status": "ok", "path": str(metrics_path)})
+        except Exception as e:
+            logger.exception("Failed to write metrics.json")
+            return web.json_response({"error": str(e)}, status=500)
+
+    app.router.add_post("/metrics", metrics)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     logger.info("Server listening on http://0.0.0.0:8080")
     await site.start()
-
+    # Keep the server running
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())

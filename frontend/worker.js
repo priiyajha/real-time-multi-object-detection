@@ -10,20 +10,24 @@ self.addEventListener('message', async (event) => {
 
     if (type === 'init') {
         try {
-            session = await ort.InferenceSession.create(payload.modelUrl);
+            if (payload.modelUrl) {
+                session = await ort.InferenceSession.create(payload.modelUrl);
+                console.log("WASM model loaded successfully in worker.");
+            } else {
+                session = null; // run in dummy mode
+            }
             self.postMessage({ type: 'init_complete', status: 'success' });
-            console.log("WASM model loaded successfully in worker.");
         } catch (e) {
             console.error("Failed to load WASM model:", e);
+            // still allow dummy mode
+            session = null;
             self.postMessage({ type: 'init_complete', status: 'error', error: e.toString() });
         }
-    } else if (type === 'infer' && session) {
+    } else if (type === 'infer') {
         const { frameData, capture_ts } = payload;
 
-        // This is a placeholder for actual inference logic.
-        // It would involve converting the image data to a tensor,
-        // running the session, and post-processing the output.
-        // For simplicity, we'll return dummy data instantly.
+        // Placeholder for actual inference. When no model is provided,
+        // return dummy detections immediately.
         const inference_ts = performance.now();
         const recv_ts = performance.now(); // In WASM mode, this is very close to capture_ts
 
